@@ -2,6 +2,7 @@ import { parseArgs } from 'node:util';
 import { RequestError } from 'octokit';
 import { z } from 'zod';
 import { getPullRequest, getPullRequestFiles, MAX_FILES, ReviewInputLimitError } from './github.js';
+import { getAuthStatus, login, logout } from './auth.js';
 
 let args: ReturnType<typeof parseArgs>;
 
@@ -29,9 +30,12 @@ try {
 
 if (args.values.help) {
   console.log(`
-      Usage: pnpm dev review <PR_URL>
+      Usage: pnpm dev <command>
       Commands:
-      review <PR_URL>  Validate a GitHub pull request URL and print its owner, repo, and number.
+      review <PR_URL>  Fetch a GitHub pull request snapshot.
+      auth login      Sign in to a model provider using OAuth.
+      auth status     Show saved credential status for supported providers.
+      auth logout <provider>  Remove local credentials for a supported provider.
 
       Options:
       -h, --help      Show this help message.
@@ -46,13 +50,68 @@ if (args.values.help) {
 
 const { positionals } = args;
 
-if (positionals.length !== 2) {
-  console.error("Usage: pnpm dev review <pr_url>");
-  process.exit(1);
+if (positionals[0] === "auth") {
+  if (positionals[1] === "login" || positionals[1] === "status") {
+    if (positionals.length !== 2) {
+      console.error(`Usage: pnpm dev auth ${positionals[1]}`);
+      process.exit(1);
+    }
+  } else if (positionals[1] === "logout") {
+    if (positionals.length !== 3 || !positionals[2].trim()) {
+      console.error("Usage: pnpm dev auth logout <provider>");
+      process.exit(1);
+    }
+  } else {
+    console.error("Usage: pnpm dev auth login | auth status | auth logout <provider>");
+    process.exit(1);
+  }
+
+  try {
+    if (positionals[1] === "login") {
+      const result = await login();
+      if (result.status === "completed") {
+        console.log(`Login completed for ${result.providerId}. Credentials saved in the application data directory.`);
+        console.log("Model access has not been verified yet.");
+      } else if (result.status === "unchanged") {
+        console.log(`Login skipped for ${result.providerId}. Saved credentials have not been changed.`);
+      }
+    } else if (positionals[1] === "status") {
+      const statuses = await getAuthStatus();
+      if (statuses.length === 0) {
+        console.log("No saved credentials for supported providers. Run pnpm dev auth login to sign in.");
+      }
+      for (const status of statuses) {
+        console.log(`${status.name}: saved credentials (${status.credentialType})`);
+      }
+      console.log("Model access and credential validity have not been verified. Environment API keys are not included.");
+    } else if (positionals[1] === "logout") {
+      const providerId = positionals[2];
+      const removed = await logout(providerId);
+      if (removed) {
+        console.log(`Local credentials removed for ${providerId}.`);
+      } else {
+        console.log(`No local credentials for ${providerId}. You are already logged out locally.`);
+      }
+      console.log("Provider-side authorization and environment API keys have not been revoked or removed.");
+    }
+  } catch (error) {
+    const message = error instanceof Error
+      ? error.message
+      : "Authentication command failed.";
+    console.error(`Error: ${message}`);
+    process.exit(1);
+  }
+
+  process.exit(0);
 }
 
 if (positionals[0] !== "review") {
-  console.error("Usage: pnpm dev review <pr_url>");
+  console.error("Unknown or missing command. Run pnpm dev --help for usage.");
+  process.exit(1);
+}
+
+if (positionals.length !== 2) {
+  console.error("Usage: pnpm dev review <PR_URL>");
   process.exit(1);
 }
 
