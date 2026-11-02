@@ -69,6 +69,7 @@ if (positionals[0] === "auth") {
   try {
     if (positionals[1] === "login") {
       const result = await login();
+
       if (result.status === "completed") {
         console.log(`Login completed for ${result.providerId}. Credentials saved in the application data directory.`);
         console.log("Model access has not been verified yet.");
@@ -77,27 +78,33 @@ if (positionals[0] === "auth") {
       }
     } else if (positionals[1] === "status") {
       const statuses = await getAuthStatus();
+
       if (statuses.length === 0) {
         console.log("No saved credentials for supported providers. Run pnpm dev auth login to sign in.");
       }
+
       for (const status of statuses) {
         console.log(`${status.name}: saved credentials (${status.credentialType})`);
       }
+
       console.log("Model access and credential validity have not been verified. Environment API keys are not included.");
     } else if (positionals[1] === "logout") {
       const providerId = positionals[2];
       const removed = await logout(providerId);
+
       if (removed) {
         console.log(`Local credentials removed for ${providerId}.`);
       } else {
         console.log(`No local credentials for ${providerId}. You are already logged out locally.`);
       }
+
       console.log("Provider-side authorization and environment API keys have not been revoked or removed.");
     }
   } catch (error) {
     const message = error instanceof Error
       ? error.message
       : "Authentication command failed.";
+
     console.error(`Error: ${message}`);
     process.exit(1);
   }
@@ -116,6 +123,7 @@ if (positionals.length !== 2) {
 }
 
 const [, pr_url] = positionals;
+
 const urlResult = z.url({ error: "Invalid URL." }).safeParse(pr_url);
 
 if (!urlResult.success) {
@@ -136,6 +144,7 @@ if (prUrl.host !== "github.com") {
 }
 
 const pathError = "Expected a pull request URL in the format https://github.com/owner/repo/pull/number.";
+
 const numberError = "Pull request number must be a positive safe integer.";
 
 const prPathSchema = z.tuple([
@@ -157,6 +166,7 @@ try {
   if (pathSegments[1] !== undefined) {
     pathSegments[1] = decodeURIComponent(pathSegments[1]);
   }
+
   if (pathSegments[2] !== undefined) {
     pathSegments[2] = decodeURIComponent(pathSegments[2]);
   }
@@ -182,7 +192,9 @@ if (!githubToken || githubToken.trim().length === 0) {
 }
 
 let pullRequest: Awaited<ReturnType<typeof getPullRequest>>;
+
 let pullRequestAfter: Awaited<ReturnType<typeof getPullRequest>>;
+
 let files: Awaited<ReturnType<typeof getPullRequestFiles>>;
 
 try {
@@ -214,6 +226,7 @@ try {
 } catch (error) {
   if (error instanceof RequestError) {
     const headers = error.response?.headers;
+
     const isRateLimit = error.status === 429 || (
       error.status === 403 && (
         headers?.['x-ratelimit-remaining'] === '0' ||
@@ -259,13 +272,16 @@ if (
 
 if (files.length !== pullRequestAfter.changed_files) {
   console.error(`Incomplete pull request file list: expected ${pullRequestAfter.changed_files} files, received ${files.length}. Review aborted.`);
+
   if (pullRequestAfter.changed_files > 3000) {
     console.error("GitHub's pull request files endpoint returns at most 3000 files, even with pagination.");
   }
+
   process.exit(1);
 }
 
 const filesWithoutPatch = files.filter((file) => !file.patch?.trim());
+
 const filesWithPatchCount = files.length - filesWithoutPatch.length;
 
 if (filesWithPatchCount === 0) {
@@ -275,6 +291,7 @@ if (filesWithPatchCount === 0) {
 
 if (filesWithoutPatch.length > 0) {
   console.warn(`Warning: Review input is partial: ${filesWithPatchCount} of ${files.length} files have non-empty text patches. The following files have no text patch and their changes cannot be analyzed from the fetched data:`);
+
   for (const file of filesWithoutPatch) {
     console.warn(`- ${file.filename}`);
   }
@@ -282,8 +299,13 @@ if (filesWithoutPatch.length > 0) {
 
 
 console.log(`Owner: ${owner}`);
+
 console.log(`Repo: ${repo}`);
+
 console.log(`PR Number: ${prNumber}`);
+
 console.log("Pull request data fetched successfully:");
+
 console.log(pullRequest);
+
 console.log(files);

@@ -5,6 +5,8 @@
   "description": "",
   "scripts": {
     "dev": "tsx --env-file-if-exists=.env src/cli.ts",
+    "lint": "oxlint . --max-warnings 0",
+    "lint:fix": "oxlint . --fix --max-warnings 0",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],
@@ -20,7 +22,9 @@
   "packageManager": "pnpm@12.10.1",
   "type": "module",
   "devDependencies": {
+    "@oxlint/plugins": "1.82.0",
     "@types/node": "^24.19.1",
+    "oxlint": "1.82.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },

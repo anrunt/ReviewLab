@@ -2,6 +2,7 @@ import { Octokit } from 'octokit';
 import { z } from 'zod';
 
 export const MAX_FILES = 200;
+
 const MAX_INPUT_BYTES = 512 * 1024;
 
 export class ReviewInputLimitError extends Error {}

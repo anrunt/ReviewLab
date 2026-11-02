@@ -5,3 +5,11 @@ dist/
 .env
 .env.*
 !.env.example
+
+# Application credentials and durable conversations (also with a repo-local data dir).
+**/auth.json
+**/auth.json.*
+**/installation-id
+*.sqlite
+*.sqlite-*
+**/conversations.lock/
