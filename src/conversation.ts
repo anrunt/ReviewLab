@@ -34,6 +34,7 @@ async function readAnswer(
     (tx) => tx.entry(AssistantEntry, record.answer),
     context,
   );
+
   const response = answer?.model?.[0];
 
   if (response?.role !== "assistant") {
