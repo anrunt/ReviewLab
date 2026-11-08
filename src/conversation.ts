@@ -153,7 +153,7 @@ export async function runConversation(content: string) {
 
     conversation = await harness.createConversation({
       ownership: { kind: "ownerless" },
-      agent: { model: MODEL, thinkingLevel: "low", tools: [] },
+      agent: { model: MODEL, thinkingLevel: "high", tools: [] },
     }, context);
     const submission = await conversation.submit({ type: "input", content }, context);
     const settled = await submission.wait(context);
