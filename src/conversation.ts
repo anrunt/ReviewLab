@@ -93,7 +93,7 @@ export async function runConversation(content: string) {
     settings: {
       stream: { timeoutMs: 60_000, maxRetries: 0, deferred: false },
       retry: { enabled: true, maxRetries: 1, baseDelayMs: 1_000, maxAgentDelayMs: 5_000 },
-      compaction: { enabled: false },
+      compaction: { enabled: true },
       afterFailedRun: "withdraw",
     },
   };
