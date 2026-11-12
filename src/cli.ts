@@ -1,8 +1,10 @@
+import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { RequestError } from 'octokit';
 import { z } from 'zod';
 import { getPullRequest, getPullRequestFiles, MAX_FILES, ReviewInputLimitError } from './github.js';
 import { getAuthStatus, login, logout } from './auth.js';
+import { runConversation } from './conversation.js';
 
 let args: ReturnType<typeof parseArgs>;
 
@@ -297,15 +299,25 @@ if (filesWithoutPatch.length > 0) {
   }
 }
 
+let systemPrompt: string;
 
-console.log(`Owner: ${owner}`);
+try {
+  systemPrompt = await readFile(new URL('../SYSTEM-PROMPT.md', import.meta.url), 'utf8');
+} catch {
+  console.error("Failed to read SYSTEM-PROMPT.md. Check that the file exists and is readable.");
+  process.exit(1);
+}
 
-console.log(`Repo: ${repo}`);
+const reviewContent = JSON.stringify(files);
 
-console.log(`PR Number: ${prNumber}`);
+try {
+  const result = await runConversation(systemPrompt, reviewContent);
+  console.log(result.text);
+} catch (error) {
+  const message = error instanceof Error
+    ? error.message
+    : "Failed to run review conversation.";
 
-console.log("Pull request data fetched successfully:");
-
-console.log(pullRequest);
-
-console.log(files);
+  console.error(`Error: ${message}`);
+  process.exit(1);
+}

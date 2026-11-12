@@ -58,7 +58,7 @@ async function readAnswer(
   return text;
 }
 
-export async function runConversation(content: string) {
+export async function runConversation(systemPrompt: string, content: string) {
   if (!content.trim()) {
     throw new ConversationError("Conversation input must not be empty.");
   }
@@ -153,7 +153,7 @@ export async function runConversation(content: string) {
 
     conversation = await harness.createConversation({
       ownership: { kind: "ownerless" },
-      agent: { model: MODEL, thinkingLevel: "high", tools: [] },
+      agent: { model: MODEL, thinkingLevel: "high", instructions: systemPrompt, tools: [] },
     }, context);
     const submission = await conversation.submit({ type: "input", content }, context);
     const settled = await submission.wait(context);
