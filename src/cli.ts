@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { RequestError } from 'octokit';
@@ -192,6 +193,9 @@ if (!githubToken || githubToken.trim().length === 0) {
   console.error("Missing GITHUB_TOKEN.");
   process.exit(1);
 }
+
+const reviewId = randomUUID();
+console.log(`Review ID: ${reviewId}`);
 
 let pullRequest: Awaited<ReturnType<typeof getPullRequest>>;
 
