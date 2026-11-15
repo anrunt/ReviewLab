@@ -33,6 +33,7 @@
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@earendil-works/pi-durable": "1.4.0",
+    "@vscode/ripgrep": "^1.18.0",
     "octokit": "^5.0.5",
     "tar": "^7.5.23",
     "zod": "^4.6.5"

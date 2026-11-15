@@ -4,6 +4,7 @@ import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "@earendil-wor
 import {
   AssistantEntry,
   createRegistry,
+  defineExtension,
   Harness,
   type Conversation,
   type HarnessOptions,
@@ -12,6 +13,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { getConversationModelRuntime, getDataDir } from "./auth.js";
+import { createSnapshotListTool, createSnapshotReadTool } from "./snapshot-tools.js";
 
 const MODEL = { provider: "openai", modelId: "gpt-6.1-sol" };
 
@@ -58,7 +60,7 @@ async function readAnswer(
   return text;
 }
 
-export async function runConversation(systemPrompt: string, content: string) {
+export async function runConversation(systemPrompt: string, content: string, snapshotPath: string) {
   if (!content.trim()) {
     throw new ConversationError("Conversation input must not be empty.");
   }
@@ -86,9 +88,17 @@ export async function runConversation(systemPrompt: string, content: string) {
   process.on("SIGTERM", cancel);
   const context = withAbortSignal(controller.signal, BACKGROUND_CONTEXT);
 
+  const snapshotReadTool = createSnapshotReadTool(snapshotPath);
+  const snapshotListTool = createSnapshotListTool(snapshotPath);
+  const registry = createRegistry();
+  registry.install(defineExtension({
+    name: "repo_snapshot",
+    tools: [snapshotReadTool, snapshotListTool],
+  }));
+
   const options: HarnessOptions = {
     models,
-    registry: createRegistry(),
+    registry,
     identity: { attribution: null, userAgent: { custom: "ReviewLab" } },
     settings: {
       stream: { timeoutMs: 60_000, maxRetries: 0, deferred: false },
@@ -153,7 +163,7 @@ export async function runConversation(systemPrompt: string, content: string) {
 
     conversation = await harness.createConversation({
       ownership: { kind: "ownerless" },
-      agent: { model: MODEL, thinkingLevel: "high", instructions: systemPrompt, tools: [] },
+      agent: { model: MODEL, thinkingLevel: "high", instructions: systemPrompt, tools: [snapshotReadTool, snapshotListTool] },
     }, context);
     const submission = await conversation.submit({ type: "input", content }, context);
     const settled = await submission.wait(context);

@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { getPullRequest, getPullRequestFiles, MAX_FILES, ReviewInputLimitError } from './github.js';
 import { getAuthStatus, login, logout } from './auth.js';
 import { runConversation } from './conversation.js';
+import { downloadSnapshot } from './snapshot.js';
 
 let args: ReturnType<typeof parseArgs>;
 
@@ -314,8 +315,17 @@ try {
 
 const reviewContent = JSON.stringify(files);
 
+let snapshotPath: string;
+
 try {
-  const result = await runConversation(systemPrompt, reviewContent);
+  snapshotPath = await downloadSnapshot(reviewId, owner, repo, pullRequest.head.sha, githubToken);
+} catch {
+  console.error("Failed to prepare the repository snapshot. Check GitHub access, connectivity, application data directory permissions and available disk space.");
+  process.exit(1);
+}
+
+try {
+  const result = await runConversation(systemPrompt, reviewContent, snapshotPath);
   console.log(result.text);
 } catch (error) {
   const message = error instanceof Error

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { createInterface, type Interface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { isRetryableAssistantError, lazyStream, type AuthInteraction } from "@earendil-works/pi-ai";
@@ -17,11 +17,7 @@ const supportedProviderIds = [
 ];
 
 export function getDataDir() {
-  const configuredDataDir = process.env.AI_REVIEWER_DATA_DIR?.trim();
-
-  return configuredDataDir
-    ? resolve(configuredDataDir)
-    : join(homedir(), ".local", "share", "ai-reviewer");
+  return join(homedir(), ".local", "share", "reviewLab");
 }
 
 export async function getModelRuntime(signal?: AbortSignal) {
@@ -78,7 +74,7 @@ export async function getConversationModelRuntime() {
     throw new Error("Failed to resolve or refresh OpenAI OAuth credentials. Sign in again with pnpm dev auth login. No API-key fallback was used.");
   }
 
-  // Durable uses streamSimple for this non-deferred, tool-free conversation.
+  // Durable uses streamSimple for this non-deferred conversation.
   // Sanitize terminal failures before they can enter the persisted transcript.
   const streamSimple = runtime.streamSimple.bind(runtime);
 
