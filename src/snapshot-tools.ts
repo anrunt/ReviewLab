@@ -1,7 +1,27 @@
+import { spawn } from "node:child_process";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
+import { rgPath } from "@vscode/ripgrep";
+import { z } from "zod";
+
+const ripgrepEventSchema = z.object({
+  type: z.string(),
+  data: z.unknown(),
+});
+
+const ripgrepMatchDataSchema = z.object({
+  path: z.object({ text: z.string() }),
+  lines: z.object({ text: z.string() }),
+  line_number: z.number().int().positive(),
+});
+
+type SnapshotTextMatch = {
+  filePath: string;
+  lineNumber: number;
+  line: string;
+};
 
 class SnapshotFilePathError extends Error {}
 
@@ -88,6 +108,117 @@ export async function listSnapshotFiles(snapshotPath: string) {
   files.sort();
 
   return files;
+}
+
+export async function searchSnapshotText(snapshotPath: string, searchText: string) {
+  if (searchText.length === 0) {
+    throw new Error("Search text must not be empty.");
+  }
+
+  if (searchText.includes("\n") || searchText.includes("\r")) {
+    throw new Error("Search text must be a single line.");
+  }
+
+  const realSnapshotPath = await realpath(snapshotPath);
+
+  const args = [
+    "--json",
+    "--fixed-strings",
+    "--case-sensitive",
+    "--hidden",
+    "--no-ignore",
+    "--no-config",
+    "--no-follow",
+    "-e",
+    searchText,
+    "--",
+    ".",
+  ];
+
+  const stdout = await new Promise<string>((resolve, reject) => {
+    const child = spawn(rgPath, args, {
+      cwd: realSnapshotPath,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+
+    child.once("error", reject);
+
+    child.once("close", (code, signal) => {
+      if (code === 0 || code === 1) {
+        resolve(stdout);
+
+        return;
+      }
+
+      if (signal) {
+        reject(new Error(`Ripgrep was terminated by signal ${signal}.`));
+
+        return;
+      }
+
+      const message = stderr.trim() || `Ripgrep failed with exit code ${code}.`;
+      reject(new Error(message));
+    });
+  });
+
+  const matches: SnapshotTextMatch[] = [];
+
+  for (const jsonLine of stdout.split("\n")) {
+    if (jsonLine.length === 0) {
+      continue;
+    }
+
+    const event = ripgrepEventSchema.parse(JSON.parse(jsonLine));
+
+    if (event.type !== "match") {
+      continue;
+    }
+
+    const data = ripgrepMatchDataSchema.parse(event.data);
+
+    matches.push({
+      filePath: data.path.text.replace(/^\.[\\/]/, ""),
+      lineNumber: data.line_number,
+      line: data.lines.text.replace(/\r?\n$/, ""),
+    });
+  }
+
+  return { matches };
+}
+
+export function createSnapshotSearchTool(snapshotPath: string) {
+  return defineTool({
+    name: "search_repo_snapshot_text",
+    description: "Search for literal, case-sensitive text in the reviewed repository snapshot. Returns a JSON object with a matches array containing filePath, lineNumber, and line for each matching line.",
+    parameters: Type.Object({
+      searchText: Type.String({
+        minLength: 1,
+        description: "Literal text to search for. Must be a single line, not a regular expression.",
+      }),
+    }),
+    execute: async ({ searchText }) => {
+      const result = await searchSnapshotText(snapshotPath, searchText);
+
+      return {
+        output: [{ type: "text", text: JSON.stringify(result) }],
+      };
+    },
+  });
 }
 
 export function createSnapshotListTool(snapshotPath: string) {

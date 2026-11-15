@@ -13,7 +13,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { getConversationModelRuntime, getDataDir } from "./auth.js";
-import { createSnapshotListTool, createSnapshotReadTool } from "./snapshot-tools.js";
+import { createSnapshotListTool, createSnapshotReadTool, createSnapshotSearchTool } from "./snapshot-tools.js";
 
 const MODEL = { provider: "openai", modelId: "gpt-6.1-sol" };
 
@@ -90,10 +90,11 @@ export async function runConversation(systemPrompt: string, content: string, sna
 
   const snapshotReadTool = createSnapshotReadTool(snapshotPath);
   const snapshotListTool = createSnapshotListTool(snapshotPath);
+  const snapshotSearchTool = createSnapshotSearchTool(snapshotPath);
   const registry = createRegistry();
   registry.install(defineExtension({
     name: "repo_snapshot",
-    tools: [snapshotReadTool, snapshotListTool],
+    tools: [snapshotReadTool, snapshotListTool, snapshotSearchTool],
   }));
 
   const options: HarnessOptions = {
@@ -163,7 +164,7 @@ export async function runConversation(systemPrompt: string, content: string, sna
 
     conversation = await harness.createConversation({
       ownership: { kind: "ownerless" },
-      agent: { model: MODEL, thinkingLevel: "high", instructions: systemPrompt, tools: [snapshotReadTool, snapshotListTool] },
+      agent: { model: MODEL, thinkingLevel: "high", instructions: systemPrompt, tools: [snapshotReadTool, snapshotListTool, snapshotSearchTool] },
     }, context);
     const submission = await conversation.submit({ type: "input", content }, context);
     const settled = await submission.wait(context);
