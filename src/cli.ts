@@ -196,6 +196,7 @@ if (!githubToken || githubToken.trim().length === 0) {
 }
 
 const reviewId = randomUUID();
+
 console.log(`Review ID: ${reviewId}`);
 
 let pullRequest: Awaited<ReturnType<typeof getPullRequest>>;

@@ -91,6 +91,7 @@ export async function runConversation(systemPrompt: string, content: string, sna
   const snapshotReadTool = createSnapshotReadTool(snapshotPath);
   const snapshotListTool = createSnapshotListTool(snapshotPath);
   const snapshotSearchTool = createSnapshotSearchTool(snapshotPath);
+
   const registry = createRegistry();
   registry.install(defineExtension({
     name: "repo_snapshot",
