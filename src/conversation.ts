@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { getConversationModelRuntime, getDataDir } from "./auth.js";
+import type { getPullRequest, getPullRequestFiles } from "./github.js";
 import { createSnapshotListTool, createSnapshotReadTool, createSnapshotSearchTool } from "./snapshot-tools.js";
 
 const MODEL = { provider: "openai", modelId: "gpt-6.1-sol" };
@@ -22,6 +23,19 @@ const CONVERSATION_TIMEOUT_MS = 150_000;
 // Only these application-authored messages may reach the CLI. Raw provider and
 // storage errors can include sensitive details and are not printed.
 class ConversationError extends Error {}
+
+export type ReviewInput = {
+  owner: string;
+  repo: string;
+  pullRequest: Awaited<ReturnType<typeof getPullRequest>>;
+  files: Awaited<ReturnType<typeof getPullRequestFiles>>;
+  systemPrompt: string;
+};
+
+export type PreparedConversation = {
+  conversation: Conversation;
+  close: () => Promise<void>;
+};
 
 async function readAnswer(
   conversation: Conversation,
@@ -60,11 +74,7 @@ async function readAnswer(
   return text;
 }
 
-export async function runConversation(systemPrompt: string, content: string, snapshotPath: string) {
-  if (!content.trim()) {
-    throw new ConversationError("Conversation input must not be empty.");
-  }
-
+export async function prepareConversation(input: ReviewInput): Promise<PreparedConversation> {
   // This helper exposes only sanitized errors and uses a bounded auth operation.
   const models = await getConversationModelRuntime();
 
@@ -75,28 +85,8 @@ export async function runConversation(systemPrompt: string, content: string, sna
   const dataDir = getDataDir();
   const databasePath = join(dataDir, "conversations.sqlite");
   const lockPath = join(dataDir, "conversations.lock");
-  const controller = new AbortController();
-  let timedOut = false;
-
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, CONVERSATION_TIMEOUT_MS);
-
-  const cancel = () => controller.abort();
-  process.on("SIGINT", cancel);
-  process.on("SIGTERM", cancel);
-  const context = withAbortSignal(controller.signal, BACKGROUND_CONTEXT);
-
-  const snapshotReadTool = createSnapshotReadTool(snapshotPath);
-  const snapshotListTool = createSnapshotListTool(snapshotPath);
-  const snapshotSearchTool = createSnapshotSearchTool(snapshotPath);
-
+  const context = withAbortSignal(AbortSignal.timeout(CONVERSATION_TIMEOUT_MS), BACKGROUND_CONTEXT);
   const registry = createRegistry();
-  registry.install(defineExtension({
-    name: "repo_snapshot",
-    tools: [snapshotReadTool, snapshotListTool, snapshotSearchTool],
-  }));
 
   const options: HarnessOptions = {
     models,
@@ -113,8 +103,27 @@ export async function runConversation(systemPrompt: string, content: string, sna
   let ownsLock = false;
   let storage: Storage | undefined;
   let harness: Harness | undefined;
-  let conversation: Conversation | undefined;
-  let workSettled = false;
+
+  async function close() {
+    try {
+      // Closing the Harness also closes its storage. Use a fresh context.
+      if (harness) {
+        await harness.close(BACKGROUND_CONTEXT);
+        harness = undefined;
+        storage = undefined;
+      } else if (storage) {
+        await storage.close(BACKGROUND_CONTEXT);
+        storage = undefined;
+      }
+
+      if (ownsLock) {
+        await rmdir(lockPath);
+        ownsLock = false;
+      }
+    } catch {
+      throw new ConversationError("Could not cleanly close conversation storage or release its lock. Confirm no process is using the database before removing conversations.lock.");
+    }
+  }
 
   try {
     await mkdir(dataDir, { recursive: true, mode: 0o700 });
@@ -163,10 +172,57 @@ export async function runConversation(systemPrompt: string, content: string, sna
       throw new ConversationError("The database contains unfinished work. It will not be resumed automatically and no new request will be submitted. Keep the database for explicit recovery.");
     }
 
-    conversation = await harness.createConversation({
+    const conversation = await harness.createConversation({
       ownership: { kind: "ownerless" },
-      agent: { model: MODEL, thinkingLevel: "high", instructions: systemPrompt, tools: [snapshotReadTool, snapshotListTool, snapshotSearchTool] },
+      agent: { model: MODEL, thinkingLevel: "high", instructions: input.systemPrompt, tools: [] },
     }, context);
+
+    // The conversation ID is also the review ID. The tools can be registered
+    // before the snapshot is downloaded because they read files only on use.
+    const snapshotPath = join(dataDir, "snapshots", String(conversation.id), "snapshot");
+    const snapshotReadTool = createSnapshotReadTool(snapshotPath);
+    const snapshotListTool = createSnapshotListTool(snapshotPath);
+    const snapshotSearchTool = createSnapshotSearchTool(snapshotPath);
+
+    registry.install(defineExtension({
+      name: "repo_snapshot",
+      tools: [snapshotReadTool, snapshotListTool, snapshotSearchTool],
+    }));
+
+    await conversation.configure({ tools: [snapshotReadTool, snapshotListTool, snapshotSearchTool] }, context);
+
+    return { conversation, close };
+  } catch (error) {
+    await close();
+
+    if (error instanceof ConversationError) {
+      throw error;
+    }
+
+    throw new ConversationError("Failed to prepare the conversation. Check the application data directory, permissions and available disk space.");
+  }
+}
+
+export async function submitConversation(conversation: Conversation, content: string) {
+  if (!content.trim()) {
+    throw new ConversationError("Conversation input must not be empty.");
+  }
+
+  const controller = new AbortController();
+  let timedOut = false;
+  let workSettled = false;
+
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, CONVERSATION_TIMEOUT_MS);
+
+  const cancel = () => controller.abort();
+  process.on("SIGINT", cancel);
+  process.on("SIGTERM", cancel);
+  const context = withAbortSignal(controller.signal, BACKGROUND_CONTEXT);
+
+  try {
     const submission = await conversation.submit({ type: "input", content }, context);
     const settled = await submission.wait(context);
     workSettled = true;
@@ -181,14 +237,9 @@ export async function runConversation(systemPrompt: string, content: string, sna
 
     const text = await readAnswer(conversation, settled, context);
 
-    return {
-      text,
-      conversationId: conversation.id,
-      submissionId: submission.id,
-      databasePath,
-    };
+    return { text };
   } catch (error) {
-    if (conversation && !workSettled) {
+    if (!workSettled) {
       try {
         // Cancelling wait() alone does not stop generation. Use a fresh cleanup
         // context to persist the abort and signal the actual model request.
@@ -206,25 +257,10 @@ export async function runConversation(systemPrompt: string, content: string, sna
       throw error;
     }
 
-    throw new ConversationError("Failed to open, run or read the conversation. Check the application data directory, permissions and available disk space.");
+    throw new ConversationError("Failed to run or read the conversation. Check the application data directory, permissions and available disk space.");
   } finally {
-    try {
-      // Close also interrupts running tasks. Do not pass the cancelled context.
-      if (harness) {
-        await harness.close(BACKGROUND_CONTEXT);
-      } else if (storage) {
-        await storage.close(BACKGROUND_CONTEXT);
-      }
-
-      if (ownsLock) {
-        await rmdir(lockPath);
-      }
-    } catch {
-      throw new ConversationError("Could not cleanly close conversation storage or release its lock. Confirm no process is using the database before removing conversations.lock.");
-    } finally {
-      clearTimeout(timeout);
-      process.off("SIGINT", cancel);
-      process.off("SIGTERM", cancel);
-    }
+    clearTimeout(timeout);
+    process.off("SIGINT", cancel);
+    process.off("SIGTERM", cancel);
   }
 }

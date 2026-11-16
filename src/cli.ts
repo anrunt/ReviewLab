@@ -1,11 +1,12 @@
-import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { RequestError } from 'octokit';
 import { z } from 'zod';
 import { getPullRequest, getPullRequestFiles, MAX_FILES, ReviewInputLimitError } from './github.js';
 import { getAuthStatus, login, logout } from './auth.js';
-import { runConversation } from './conversation.js';
+import { prepareConversation, submitConversation, type PreparedConversation } from './conversation.js';
+import { ReviewDoc, type ReviewInput } from './review-state.js';
 import { downloadSnapshot } from './snapshot.js';
 
 let args: ReturnType<typeof parseArgs>;
@@ -195,10 +196,6 @@ if (!githubToken || githubToken.trim().length === 0) {
   process.exit(1);
 }
 
-const reviewId = randomUUID();
-
-console.log(`Review ID: ${reviewId}`);
-
 let pullRequest: Awaited<ReturnType<typeof getPullRequest>>;
 
 let pullRequestAfter: Awaited<ReturnType<typeof getPullRequest>>;
@@ -314,19 +311,54 @@ try {
   process.exit(1);
 }
 
+const reviewInput: ReviewInput = {
+  owner,
+  repo,
+  pullRequest,
+  files,
+  systemPrompt,
+};
+
 const reviewContent = JSON.stringify(files);
 
-let snapshotPath: string;
+let prepared: PreparedConversation | undefined;
 
 try {
-  snapshotPath = await downloadSnapshot(reviewId, owner, repo, pullRequest.head.sha, githubToken);
-} catch {
-  console.error("Failed to prepare the repository snapshot. Check GitHub access, connectivity, application data directory permissions and available disk space.");
-  process.exit(1);
-}
+  prepared = await prepareConversation(reviewInput);
+  const reviewId = prepared.conversation.id;
 
-try {
-  const result = await runConversation(systemPrompt, reviewContent, snapshotPath);
+  console.log(`Review ID: ${reviewId}`);
+
+  let snapshotError: string | null = null;
+
+  try {
+    await downloadSnapshot(String(reviewId), owner, repo, pullRequest.head.sha, githubToken);
+  } catch {
+    snapshotError = "Failed to prepare the repository snapshot. Check GitHub access, connectivity, application data directory permissions and available disk space.";
+  }
+
+  try {
+    await prepared.conversation.commit(async (tx) => {
+      const state = await tx.doc(ReviewDoc, reviewId);
+
+      if (snapshotError === null) {
+        state.stage = "snapshot_ready";
+      } else {
+        state.stage = "preparing_snapshot";
+      }
+
+      state.lastError = snapshotError;
+    }, BACKGROUND_CONTEXT);
+  } catch {
+    throw new Error("Failed to save the snapshot preparation status. Keep the review data for recovery.");
+  }
+
+  if (snapshotError !== null) {
+    throw new Error(snapshotError);
+  }
+
+  const result = await submitConversation(prepared.conversation, reviewContent);
+
   console.log(result.text);
 } catch (error) {
   const message = error instanceof Error
@@ -334,5 +366,18 @@ try {
     : "Failed to run review conversation.";
 
   console.error(`Error: ${message}`);
-  process.exit(1);
+  process.exitCode = 1;
+} finally {
+  if (prepared) {
+    try {
+      await prepared.close();
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : "Failed to close the prepared conversation.";
+
+      console.error(`Error: ${message}`);
+      process.exitCode = 1;
+    }
+  }
 }
