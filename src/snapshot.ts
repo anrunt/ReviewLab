@@ -1,12 +1,21 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import type { ConversationId } from "@earendil-works/pi-durable";
 import { Octokit } from "octokit";
 import { extract } from "tar";
 import { getDataDir } from "./auth.js";
 
-export async function downloadSnapshot(reviewId: string, owner: string, repo: string, head_sha: string, token: string) {
+export function getSnapshotPath(reviewId: ConversationId) {
+  if (!Number.isSafeInteger(reviewId) || reviewId <= 0) {
+    throw new Error("Snapshot review ID must be a positive safe integer.");
+  }
+
+  return join(getDataDir(), "snapshots", String(reviewId), "snapshot");
+}
+
+export async function downloadSnapshot(reviewId: ConversationId, owner: string, repo: string, head_sha: string, token: string) {
   const octokit = new Octokit({
     auth: token,
     throttle: {
@@ -15,9 +24,7 @@ export async function downloadSnapshot(reviewId: string, owner: string, repo: st
     },
   });
 
-  const snapshotPath = join(getDataDir(), "snapshots", reviewId, "snapshot");
-
-  await mkdir(snapshotPath, { recursive: true, mode: 0o700 });
+  const snapshotPath = getSnapshotPath(reviewId);
 
   const response = await octokit.rest.repos.downloadTarballArchive({
     owner,
@@ -30,6 +37,10 @@ export async function downloadSnapshot(reviewId: string, owner: string, repo: st
   if (!(archiveData instanceof ArrayBuffer)) {
     throw new Error("GitHub returned an invalid repository archive.");
   }
+
+  // An interrupted extraction may have left a partial snapshot.
+  await rm(snapshotPath, { recursive: true, force: true });
+  await mkdir(snapshotPath, { recursive: true, mode: 0o700 });
 
   await pipeline(
     Readable.from([Buffer.from(archiveData)]),

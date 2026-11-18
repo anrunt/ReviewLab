@@ -1,13 +1,44 @@
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
+import type { Conversation, ConversationId } from '@earendil-works/pi-durable';
 import { RequestError } from 'octokit';
 import { z } from 'zod';
 import { getPullRequest, getPullRequestFiles, MAX_FILES, ReviewInputLimitError } from './github.js';
 import { getAuthStatus, login, logout } from './auth.js';
-import { prepareConversation, submitConversation, type PreparedConversation } from './conversation.js';
+import { openReviewConversation, prepareConversation, submitConversation, type PreparedConversation } from './conversation.js';
 import { ReviewDoc, type ReviewInput } from './review-state.js';
 import { downloadSnapshot } from './snapshot.js';
+
+async function prepareReviewSnapshot(conversation: Conversation, input: ReviewInput, githubToken: string) {
+  let snapshotError: string | null = null;
+
+  try {
+    await downloadSnapshot(conversation.id, input.owner, input.repo, input.pullRequest.head.sha, githubToken);
+  } catch {
+    snapshotError = "Failed to prepare the repository snapshot. Check GitHub access, connectivity, application data directory permissions and available disk space.";
+  }
+
+  try {
+    await conversation.commit(async (tx) => {
+      const state = await tx.doc(ReviewDoc, conversation.id);
+
+      if (snapshotError === null) {
+        state.stage = "snapshot_ready";
+      } else {
+        state.stage = "preparing_snapshot";
+      }
+
+      state.lastError = snapshotError;
+    }, BACKGROUND_CONTEXT);
+  } catch {
+    throw new Error("Failed to save the snapshot preparation status. Keep the review data for recovery.");
+  }
+
+  if (snapshotError !== null) {
+    throw new Error(snapshotError);
+  }
+}
 
 let args: ReturnType<typeof parseArgs>;
 
@@ -38,6 +69,7 @@ if (args.values.help) {
       Usage: pnpm dev <command>
       Commands:
       review <PR_URL>  Fetch a GitHub pull request snapshot.
+      resume <reviewId>  Continue a review that has not started analysis.
       auth login      Sign in to a model provider using OAuth.
       auth status     Show saved credential status for supported providers.
       auth logout <provider>  Remove local credentials for a supported provider.
@@ -115,6 +147,54 @@ if (positionals[0] === "auth") {
   }
 
   process.exit(0);
+}
+
+if (positionals[0] === "resume") {
+  if (positionals.length !== 2) {
+    console.error("Usage: pnpm dev resume <reviewId>");
+    process.exit(1);
+  }
+
+  const rawReviewId = positionals[1];
+  const reviewId = Number(rawReviewId);
+
+  if (!/^[0-9]+$/.test(rawReviewId) || !Number.isSafeInteger(reviewId) || reviewId <= 0) {
+    console.error("Review ID must be a positive safe integer.");
+    process.exit(1);
+  }
+
+  try {
+    const review = await openReviewConversation(reviewId as ConversationId);
+
+    try {
+      if (review.state.stage === "analyzing") {
+        console.log(`Review ${review.conversation.id} stage: ${review.state.stage}`);
+      } else {
+        if (review.state.stage === "preparing_snapshot") {
+          const githubToken = process.env.GITHUB_TOKEN;
+
+          if (!githubToken || githubToken.trim().length === 0) {
+            throw new Error("Missing GITHUB_TOKEN.");
+          }
+
+          await prepareReviewSnapshot(review.conversation, review.state.input, githubToken);
+        }
+
+        const result = await review.startAnalysis();
+
+        console.log(result.text);
+      }
+    } finally {
+      await review.close();
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to open saved review.";
+
+    console.error(`Error: ${message}`);
+    process.exitCode = 1;
+  }
+
+  process.exit(process.exitCode ?? 0);
 }
 
 if (positionals[0] !== "review") {
@@ -329,33 +409,7 @@ try {
 
   console.log(`Review ID: ${reviewId}`);
 
-  let snapshotError: string | null = null;
-
-  try {
-    await downloadSnapshot(String(reviewId), owner, repo, pullRequest.head.sha, githubToken);
-  } catch {
-    snapshotError = "Failed to prepare the repository snapshot. Check GitHub access, connectivity, application data directory permissions and available disk space.";
-  }
-
-  try {
-    await prepared.conversation.commit(async (tx) => {
-      const state = await tx.doc(ReviewDoc, reviewId);
-
-      if (snapshotError === null) {
-        state.stage = "snapshot_ready";
-      } else {
-        state.stage = "preparing_snapshot";
-      }
-
-      state.lastError = snapshotError;
-    }, BACKGROUND_CONTEXT);
-  } catch {
-    throw new Error("Failed to save the snapshot preparation status. Keep the review data for recovery.");
-  }
-
-  if (snapshotError !== null) {
-    throw new Error(snapshotError);
-  }
+  await prepareReviewSnapshot(prepared.conversation, reviewInput, githubToken);
 
   const result = await submitConversation(prepared.conversation, reviewContent);
 
