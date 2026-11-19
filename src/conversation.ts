@@ -16,7 +16,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { getConversationModelRuntime, getDataDir } from "./auth.js";
-import { ReviewDoc, type ReviewInput } from "./review-state.js";
+import { ReviewDoc, type ReviewInput, type ReviewState } from "./review-state.js";
 import { createSnapshotListTool, createSnapshotReadTool, createSnapshotSearchTool } from "./snapshot-tools.js";
 import { getSnapshotPath } from "./snapshot.js";
 
@@ -27,11 +27,6 @@ const CONVERSATION_TIMEOUT_MS = 150_000;
 // Only these application-authored messages may reach the CLI. Raw provider and
 // storage errors can include sensitive details and are not printed.
 class ConversationError extends Error {}
-
-export type PreparedConversation = {
-  conversation: Conversation;
-  close: () => Promise<void>;
-};
 
 async function readAnswer(
   conversation: Conversation,
@@ -200,89 +195,145 @@ async function configureSnapshotTools(conversation: Conversation, registry: Regi
   await conversation.configure({ tools }, context);
 }
 
-export async function openReviewConversation(reviewId: ConversationId) {
-  let models: Models = createModels();
-  const { harness, context, registry, close } = await openConversationHarness(() => models);
+async function readReviewState(conversation: Conversation, harness: Harness, context: Context) {
+  const state = await harness.snapshot(ReviewDoc, conversation.id, context);
 
-  try {
-    const conversation = await harness.conversation(reviewId, context);
+  const input = state?.input;
 
-    if (!conversation) {
-      throw new ConversationError(`Review ${reviewId} not found.`);
-    }
+  if (!state || !input) {
+    throw new ConversationError(`Review ${conversation.id} has no saved review input.`);
+  }
 
-    const state = await harness.snapshot(ReviewDoc, conversation.id, context);
+  return { ...state, input };
+}
 
-    const input = state?.input;
+export class ReviewConversation {
+  private constructor(
+    readonly conversation: Conversation,
+    readonly state: Readonly<ReviewState> & { readonly input: ReviewInput },
+    private readonly resources: Awaited<ReturnType<typeof openConversationHarness>>,
+    private readonly modelAccess: { current?: Models },
+  ) {}
 
-    if (!state || !input) {
-      throw new ConversationError(`Review ${reviewId} has no saved review input.`);
-    }
+  static async create(input: ReviewInput) {
+    const models = await getReviewModels();
+    const resources = await openConversationHarness(models);
+    const { harness, context } = resources;
 
-    const startAnalysis = async () => {
-      const analysisContext = withAbortSignal(AbortSignal.timeout(CONVERSATION_TIMEOUT_MS), BACKGROUND_CONTEXT);
+    try {
+      await ensureNoPendingWork(harness, context);
 
-      try {
-        // Submitting enables scheduling for the whole Harness. We only have
-        // the snapshot tools for this review loaded here.
-        await ensureNoPendingWork(harness, analysisContext);
-        models = await getReviewModels();
-        await configureSnapshotTools(conversation, registry, analysisContext);
-      } catch (error) {
-        if (error instanceof ConversationError) {
-          throw error;
-        }
+      const conversation = await harness.createConversation({
+        ownership: { kind: "ownerless" },
+        agent: { model: MODEL, thinkingLevel: "high", instructions: input.systemPrompt, tools: [] },
+        init: async (tx, conversationId) => {
+          const state = await tx.doc(ReviewDoc, conversationId);
 
-        throw new ConversationError("Failed to prepare the saved review for analysis. Check model login and conversation storage.");
+          state.input = input;
+        },
+      }, context);
+
+      const state = await readReviewState(conversation, harness, context);
+
+      return new ReviewConversation(conversation, state, resources, { current: models });
+    } catch (error) {
+      await resources.close();
+
+      if (error instanceof ConversationError) {
+        throw error;
       }
 
-      return submitConversation(conversation, JSON.stringify(input.files));
-    };
+      throw new ConversationError("Failed to prepare the conversation. Check the application data directory, permissions and available disk space.");
+    }
+  }
 
-    return { conversation, state: { ...state, input }, startAnalysis, close };
-  } catch (error) {
-    await close();
+  static async open(reviewId: ConversationId) {
+    const emptyModels = createModels();
+    const modelAccess: { current?: Models } = {};
+    const resources = await openConversationHarness(() => modelAccess.current ?? emptyModels);
+    const { harness, context } = resources;
 
-    if (error instanceof ConversationError) {
-      throw error;
+    try {
+      const conversation = await harness.conversation(reviewId, context);
+
+      if (!conversation) {
+        throw new ConversationError(`Review ${reviewId} not found.`);
+      }
+
+      const state = await readReviewState(conversation, harness, context);
+
+      return new ReviewConversation(conversation, state, resources, modelAccess);
+    } catch (error) {
+      await resources.close();
+
+      if (error instanceof ConversationError) {
+        throw error;
+      }
+
+      throw new ConversationError("Failed to read saved review state.");
+    }
+  }
+
+  async findAnalysisSubmission() {
+    const requestId = this.state.requestId;
+
+    if (requestId === null) {
+      throw new ConversationError(`Review ${this.conversation.id} has no saved request ID.`);
     }
 
-    throw new ConversationError("Failed to read saved review state.");
+    try {
+      return await this.conversation.commit(
+        (tx) => tx.submissionByRequest(this.conversation.id, requestId),
+        this.resources.context,
+      );
+    } catch {
+      throw new ConversationError("Failed to look up the saved analysis submission.");
+    }
+  }
+
+  async readSavedAnswer(submission: SubmissionRecord) {
+    try {
+      return await readAnswer(this.conversation, submission, this.resources.context);
+    } catch (error) {
+      if (error instanceof ConversationError) {
+        throw error;
+      }
+
+      throw new ConversationError("Failed to read the saved analysis result.");
+    }
+  }
+
+  async startAnalysis() {
+    const analysisContext = withAbortSignal(AbortSignal.timeout(CONVERSATION_TIMEOUT_MS), BACKGROUND_CONTEXT);
+    const { harness, registry } = this.resources;
+
+    try {
+      // Submitting enables scheduling for the whole Harness. We only have
+      // the snapshot tools for this review loaded here.
+      await ensureNoPendingWork(harness, analysisContext);
+
+      if (!this.modelAccess.current) {
+        this.modelAccess.current = await getReviewModels();
+      }
+
+      await configureSnapshotTools(this.conversation, registry, analysisContext);
+    } catch (error) {
+      if (error instanceof ConversationError) {
+        throw error;
+      }
+
+      throw new ConversationError("Failed to prepare the saved review for analysis. Check model login and conversation storage.");
+    }
+
+    return submitConversation(this.conversation, JSON.stringify(this.state.input.files));
+  }
+
+  close() {
+    return this.resources.close();
   }
 }
 
-export async function prepareConversation(input: ReviewInput): Promise<PreparedConversation> {
-  const models = await getReviewModels();
-  const { harness, context, registry, close } = await openConversationHarness(models);
-
-  try {
-    await ensureNoPendingWork(harness, context);
-
-    const conversation = await harness.createConversation({
-      ownership: { kind: "ownerless" },
-      agent: { model: MODEL, thinkingLevel: "high", instructions: input.systemPrompt, tools: [] },
-      init: async (tx, conversationId) => {
-        const state = await tx.doc(ReviewDoc, conversationId);
-
-        state.input = input;
-      },
-    }, context);
-
-    await configureSnapshotTools(conversation, registry, context);
-
-    return { conversation, close };
-  } catch (error) {
-    await close();
-
-    if (error instanceof ConversationError) {
-      throw error;
-    }
-
-    throw new ConversationError("Failed to prepare the conversation. Check the application data directory, permissions and available disk space.");
-  }
-}
-
-export async function submitConversation(conversation: Conversation, content: string) {
+async function submitConversation(conversation: Conversation, content: string) {
   if (!content.trim()) {
     throw new ConversationError("Conversation input must not be empty.");
   }
