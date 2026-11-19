@@ -1,16 +1,17 @@
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import type { Conversation, ConversationId } from '@earendil-works/pi-durable';
+import type { ConversationId } from '@earendil-works/pi-durable';
 import { RequestError } from 'octokit';
 import { z } from 'zod';
 import { getPullRequest, getPullRequestFiles, MAX_FILES, ReviewInputLimitError } from './github.js';
 import { getAuthStatus, login, logout } from './auth.js';
-import { openReviewConversation, prepareConversation, submitConversation, type PreparedConversation } from './conversation.js';
+import { ReviewConversation } from './conversation.js';
 import { ReviewDoc, type ReviewInput } from './review-state.js';
 import { downloadSnapshot } from './snapshot.js';
 
-async function prepareReviewSnapshot(conversation: Conversation, input: ReviewInput, githubToken: string) {
+async function prepareReviewSnapshot(review: ReviewConversation, githubToken: string) {
+  const { conversation, state: { input } } = review;
   let snapshotError: string | null = null;
 
   try {
@@ -164,11 +165,21 @@ if (positionals[0] === "resume") {
   }
 
   try {
-    const review = await openReviewConversation(reviewId as ConversationId);
+    const review = await ReviewConversation.open(reviewId as ConversationId);
 
     try {
       if (review.state.stage === "analyzing") {
-        console.log(`Review ${review.conversation.id} stage: ${review.state.stage}`);
+        const submission = await review.findAnalysisSubmission();
+
+        if (submission?.status === "done") {
+          const text = await review.readSavedAnswer(submission);
+
+          console.log(text);
+        } else {
+          const status = submission?.status ?? "not_submitted";
+
+          console.log(`Review ${review.conversation.id} submission: ${status}`);
+        }
       } else {
         if (review.state.stage === "preparing_snapshot") {
           const githubToken = process.env.GITHUB_TOKEN;
@@ -177,7 +188,7 @@ if (positionals[0] === "resume") {
             throw new Error("Missing GITHUB_TOKEN.");
           }
 
-          await prepareReviewSnapshot(review.conversation, review.state.input, githubToken);
+          await prepareReviewSnapshot(review, githubToken);
         }
 
         const result = await review.startAnalysis();
@@ -399,19 +410,16 @@ const reviewInput: ReviewInput = {
   systemPrompt,
 };
 
-const reviewContent = JSON.stringify(files);
-
-let prepared: PreparedConversation | undefined;
+let review: ReviewConversation | undefined;
 
 try {
-  prepared = await prepareConversation(reviewInput);
-  const reviewId = prepared.conversation.id;
+  review = await ReviewConversation.create(reviewInput);
 
-  console.log(`Review ID: ${reviewId}`);
+  console.log(`Review ID: ${review.conversation.id}`);
 
-  await prepareReviewSnapshot(prepared.conversation, reviewInput, githubToken);
+  await prepareReviewSnapshot(review, githubToken);
 
-  const result = await submitConversation(prepared.conversation, reviewContent);
+  const result = await review.startAnalysis();
 
   console.log(result.text);
 } catch (error) {
@@ -422,9 +430,9 @@ try {
   console.error(`Error: ${message}`);
   process.exitCode = 1;
 } finally {
-  if (prepared) {
+  if (review) {
     try {
-      await prepared.close();
+      await review.close();
     } catch (error) {
       const message = error instanceof Error
         ? error.message
