@@ -173,10 +173,16 @@ async function getReviewModels() {
   return models;
 }
 
-async function ensureNoPendingWork(harness: Harness, context: Context) {
+async function ensureNoPendingWork(harness: Harness, context: Context, allowedConversationId?: ConversationId) {
   const pending = await harness.inspect(context);
+  const hasPendingTasks = pending.tasks.some(({ record }) => record.conversationId !== allowedConversationId);
+  const hasPendingSubmissions = pending.submissions.some((submission) => submission.conversationId !== allowedConversationId);
 
-  if (pending.tasks.length > 0 || pending.submissions.length > 0) {
+  if (hasPendingTasks || hasPendingSubmissions) {
+    if (allowedConversationId !== undefined) {
+      throw new ConversationError("Cannot resume this analysis while the database contains unfinished work for another review.");
+    }
+
     throw new ConversationError("The database contains unfinished work. It will not be resumed automatically and no new request will be submitted. Keep the database for explicit recovery.");
   }
 }
@@ -292,8 +298,10 @@ export class ReviewConversation {
   }
 
   async readSavedAnswer(submission: SubmissionRecord) {
+    const context = withAbortSignal(AbortSignal.timeout(CONVERSATION_TIMEOUT_MS), BACKGROUND_CONTEXT);
+
     try {
-      return await readAnswer(this.conversation, submission, this.resources.context);
+      return await readAnswer(this.conversation, submission, context);
     } catch (error) {
       if (error instanceof ConversationError) {
         throw error;
@@ -305,18 +313,78 @@ export class ReviewConversation {
 
   async startAnalysis() {
     const analysisContext = withAbortSignal(AbortSignal.timeout(CONVERSATION_TIMEOUT_MS), BACKGROUND_CONTEXT);
+
+    await this.prepareAnalysisRuntime(analysisContext);
+
+    return submitConversation(this.conversation, JSON.stringify(this.state.input.files));
+  }
+
+  async waitForAnalysisSubmission(record: SubmissionRecord) {
+    if (
+      record.type !== "input" ||
+      record.conversationId !== this.conversation.id ||
+      (record.status !== "queued" && record.status !== "placed")
+    ) {
+      throw new ConversationError("Expected a pending analysis submission for this review.");
+    }
+
+    const controller = new AbortController();
+    let timedOut = false;
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, CONVERSATION_TIMEOUT_MS);
+
+    const cancel = () => controller.abort();
+    process.on("SIGINT", cancel);
+    process.on("SIGTERM", cancel);
+    const context = withAbortSignal(controller.signal, BACKGROUND_CONTEXT);
+
+    try {
+      const submission = await this.resources.harness.submission(record.id, context);
+
+      if (!submission) {
+        throw new ConversationError("The saved analysis submission was not found.");
+      }
+
+      await this.prepareAnalysisRuntime(context, this.conversation.id);
+
+      return await submission.wait(context);
+    } catch (error) {
+      if (timedOut) {
+        throw new ConversationError(`Waiting for the analysis exceeded its ${CONVERSATION_TIMEOUT_MS / 1000}-second time limit.`);
+      }
+
+      if (controller.signal.aborted) {
+        throw new ConversationError("Waiting for the analysis was cancelled.");
+      }
+
+      if (error instanceof ConversationError) {
+        throw error;
+      }
+
+      throw new ConversationError("Failed to wait for the saved analysis submission.");
+    } finally {
+      clearTimeout(timeout);
+      process.off("SIGINT", cancel);
+      process.off("SIGTERM", cancel);
+    }
+  }
+
+  private async prepareAnalysisRuntime(context: Context, allowedConversationId?: ConversationId) {
     const { harness, registry } = this.resources;
 
     try {
-      // Submitting enables scheduling for the whole Harness. We only have
+      // Submitting or waiting enables scheduling for the whole Harness. We only have
       // the snapshot tools for this review loaded here.
-      await ensureNoPendingWork(harness, analysisContext);
+      await ensureNoPendingWork(harness, context, allowedConversationId);
 
       if (!this.modelAccess.current) {
         this.modelAccess.current = await getReviewModels();
       }
 
-      await configureSnapshotTools(this.conversation, registry, analysisContext);
+      await configureSnapshotTools(this.conversation, registry, context);
     } catch (error) {
       if (error instanceof ConversationError) {
         throw error;
@@ -324,8 +392,6 @@ export class ReviewConversation {
 
       throw new ConversationError("Failed to prepare the saved review for analysis. Check model login and conversation storage.");
     }
-
-    return submitConversation(this.conversation, JSON.stringify(this.state.input.files));
   }
 
   close() {

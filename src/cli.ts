@@ -169,7 +169,11 @@ if (positionals[0] === "resume") {
 
     try {
       if (review.state.stage === "analyzing") {
-        const submission = await review.findAnalysisSubmission();
+        let submission = await review.findAnalysisSubmission();
+
+        if (submission?.status === "queued" || submission?.status === "placed") {
+          submission = await review.waitForAnalysisSubmission(submission);
+        }
 
         if (submission?.status === "done") {
           const text = await review.readSavedAnswer(submission);
