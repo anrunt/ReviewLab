@@ -10,37 +10,6 @@ import { ReviewConversation } from './conversation.js';
 import { ReviewDoc, type ReviewInput } from './review-state.js';
 import { downloadSnapshot } from './snapshot.js';
 
-async function prepareReviewSnapshot(review: ReviewConversation, githubToken: string) {
-  const { conversation, state: { input } } = review;
-  let snapshotError: string | null = null;
-
-  try {
-    await downloadSnapshot(conversation.id, input.owner, input.repo, input.pullRequest.head.sha, githubToken);
-  } catch {
-    snapshotError = "Failed to prepare the repository snapshot. Check GitHub access, connectivity, application data directory permissions and available disk space.";
-  }
-
-  try {
-    await conversation.commit(async (tx) => {
-      const state = await tx.doc(ReviewDoc, conversation.id);
-
-      if (snapshotError === null) {
-        state.stage = "snapshot_ready";
-      } else {
-        state.stage = "preparing_snapshot";
-      }
-
-      state.lastError = snapshotError;
-    }, BACKGROUND_CONTEXT);
-  } catch {
-    throw new Error("Failed to save the snapshot preparation status. Keep the review data for recovery.");
-  }
-
-  if (snapshotError !== null) {
-    throw new Error(snapshotError);
-  }
-}
-
 let args: ReturnType<typeof parseArgs>;
 
 try {
@@ -475,5 +444,36 @@ try {
       console.error(`Error: ${message}`);
       process.exitCode = 1;
     }
+  }
+}
+
+async function prepareReviewSnapshot(review: ReviewConversation, githubToken: string) {
+  const { conversation, state: { input } } = review;
+  let snapshotError: string | null = null;
+
+  try {
+    await downloadSnapshot(conversation.id, input.owner, input.repo, input.pullRequest.head.sha, githubToken);
+  } catch {
+    snapshotError = "Failed to prepare the repository snapshot. Check GitHub access, connectivity, application data directory permissions and available disk space.";
+  }
+
+  try {
+    await conversation.commit(async (tx) => {
+      const state = await tx.doc(ReviewDoc, conversation.id);
+
+      if (snapshotError === null) {
+        state.stage = "snapshot_ready";
+      } else {
+        state.stage = "preparing_snapshot";
+      }
+
+      state.lastError = snapshotError;
+    }, BACKGROUND_CONTEXT);
+  } catch {
+    throw new Error("Failed to save the snapshot preparation status. Keep the review data for recovery.");
+  }
+
+  if (snapshotError !== null) {
+    throw new Error(snapshotError);
   }
 }
