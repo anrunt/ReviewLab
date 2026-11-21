@@ -4,7 +4,8 @@
     {
       "name": "anti-slop",
       "specifier": "./tools/oxlint/anti-slop/index.ts"
-    }
+    },
+    "./tools/oxlint/project.ts"
   ],
   "plugins": ["typescript"],
   "categories": {
@@ -34,6 +35,7 @@
     "prefer-const": "error",
     "prefer-rest-params": "error",
     "prefer-spread": "error",
+    "project/no-comments": "error",
     "typescript/ban-ts-comment": "error",
     "typescript/no-empty-object-type": "error",
     "typescript/no-explicit-any": "error",

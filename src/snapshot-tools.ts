@@ -5,6 +5,8 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
 import { rgPath } from "@vscode/ripgrep";
 import { z } from "zod";
+import { getRepositoryFileText, MAX_REPOSITORY_FILE_BYTES } from "./github.js";
+import type { ReviewInput } from "./review-state.js";
 
 const ripgrepEventSchema = z.object({
   type: z.string(),
@@ -258,6 +260,42 @@ export function createSnapshotReadTool(snapshotPath: string) {
       return {
         output: [{ type: "text", text: content }],
       };
+    },
+  });
+}
+
+export function createMergeBaseReadTool(input: Pick<ReviewInput, "owner" | "repo" | "mergeBaseSha">) {
+  return defineTool({
+    name: "read_merge_base_file",
+    description: "Read the complete UTF-8 text of one file at the review's merge base. Use this when you need to inspect the previous version of a file. For a renamed file, use its old path. Files added by the PR may be absent at the merge base.",
+    replay: "safe",
+    parameters: Type.Object({
+      filePath: Type.String({
+        minLength: 1,
+        description: "Path to the file relative to the repository root at the merge base.",
+      }),
+    }),
+    outputLimits: {
+      maxBytes: MAX_REPOSITORY_FILE_BYTES,
+      maxLines: MAX_REPOSITORY_FILE_BYTES + 1,
+    },
+    execute: async ({ filePath }, _api, context) => {
+      const token = process.env.GITHUB_TOKEN;
+
+      if (!token?.trim()) {
+        throw new Error("Missing GITHUB_TOKEN. Historical file contents are unavailable.");
+      }
+
+      const text = await getRepositoryFileText({
+        token,
+        owner: input.owner,
+        repo: input.repo,
+        filePath,
+        ref: input.mergeBaseSha,
+        signal: context.abortSignal,
+      });
+
+      return { output: [{ type: "text", text }] };
     },
   });
 }

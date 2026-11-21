@@ -5,6 +5,7 @@ export type ReviewInput = {
   owner: string;
   repo: string;
   pullRequest: Awaited<ReturnType<typeof getPullRequest>>;
+  mergeBaseSha: string;
   files: Awaited<ReturnType<typeof getPullRequestFiles>>;
   systemPrompt: string;
 };

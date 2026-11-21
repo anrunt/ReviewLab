@@ -45,8 +45,6 @@ export async function getConversationModelRuntime() {
       throw new Error("OpenAI OAuth is unavailable.");
     }
 
-    // Remove the API-key handler for the lifetime of this runtime. A missing,
-    // deleted or replaced OAuth credential cannot fall back to an environment key.
     runtime.registerNativeProvider({
       ...provider,
       auth: { oauth: provider.auth.oauth },
@@ -63,8 +61,6 @@ export async function getConversationModelRuntime() {
   }
 
   try {
-    // Let the library refresh and persist tokens under its own lock. Never
-    // return or log resolved request credentials; Harness receives only runtime.
     const resolved = await runtime.getAuth("openai", { signal });
 
     if (resolved?.source !== "OAuth") {
@@ -74,8 +70,6 @@ export async function getConversationModelRuntime() {
     throw new Error("Failed to resolve or refresh OpenAI OAuth credentials. Sign in again with pnpm dev auth login. No API-key fallback was used.");
   }
 
-  // Durable uses streamSimple for this non-deferred conversation.
-  // Sanitize terminal failures before they can enter the persisted transcript.
   const streamSimple = runtime.streamSimple.bind(runtime);
 
   runtime.streamSimple = (model, context, options) => lazyStream(model, async () => {
@@ -117,8 +111,6 @@ export async function getAuthStatus() {
   try {
     const runtime = await getModelRuntime();
 
-    // Passing a signal makes storage read errors propagate instead of falling
-    // back to a cached snapshot. It also bounds waiting for the file lock.
     const credentials = await runtime.listCredentials({
       signal: AbortSignal.timeout(10_000),
     });
@@ -177,7 +169,6 @@ function getInstallationId() {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 
   try {
-    // Exclusive creation preserves the existing ID, including across processes.
     writeFileSync(idPath, randomUUID(), { flag: "wx", mode: 0o600 });
   } catch (error) {
     if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) {
@@ -337,7 +328,6 @@ export async function login(): Promise<{
         }
 
         try {
-          // question() prints its prompt before input echo is suppressed.
           const answer = terminal.question(`${prompt.message} `, { signal });
           hideInput = hidden;
 
@@ -396,7 +386,6 @@ export async function login(): Promise<{
     }
 
     if (loginStarted) {
-      // Provider errors may contain token endpoint bodies or callback URLs.
       throw new Error("Provider login failed. Check the browser authorization, callback port and application data permissions, then try again.");
     }
 

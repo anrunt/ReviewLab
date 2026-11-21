@@ -14,8 +14,14 @@ Każde review otrzymuje identyfikator i jest wznawiane jawną komendą. Wznowien
 
 Każdy snapshot znajduje się we własnym katalogu danych aplikacji, poza systemowym katalogiem tymczasowym. Niedokończone review zachowuje snapshot między uruchomieniami. Dopiero poprawne zakończenie review pozwala usunąć jego pliki, z zachowaniem raportu, rozmowy i danych wejściowych. Nowe commity wymagają pobrania nowego snapshotu.
 
+Ponowienie przygotowania snapshotu usuwa poprzednią zawartość katalogu ekstrakcji, ponieważ przerwane rozpakowywanie może pozostawić częściowe pliki. Podczas ekstrakcji pomijamy jeden segment ścieżki, ponieważ GitHub umieszcza zawartość archiwum w katalogu nadrzędnym. Dzięki temu narzędzia snapshotu używają ścieżek względnych wobec katalogu głównego repozytorium.
+
 Poprawne zakończenie oznacza przejście walidacji raportu i jego trwały zapis. Następnie aplikacja automatycznie usuwa snapshot, bez dodatkowego potwierdzenia użytkownika. Samo otrzymanie końcowej odpowiedzi modelu nie oznacza zakończenia review.
 
 Nie ograniczamy liczby wywołań narzędzi. Domyślny limit czasu wykonania wynosi 30 minut i można go skonfigurować. Przekroczenie limitu lub przerwanie przez użytkownika pozostawia review niedokończone i możliwe do wznowienia. Wznowienie otrzymuje nowy budżet czasu, ale zachowuje wykorzystaną próbę korekty raportu. Włączamy automatyczną kompakcję kontekstu podczas długich analiz.
+
+Jeden Harness ma wyłączny dostęp do bazy rozmów, ponieważ adapter SQLite pi-durable nie koordynuje wielu instancji Harnessu. Zgłoszenie pracy lub oczekiwanie na zapisane zgłoszenie uruchamia planowanie dla całego Harnessu. Przed tymi operacjami sprawdzamy zaległą pracę innych rozmów, ponieważ bieżące uruchomienie ładuje narzędzia snapshotu tylko dla jednego review.
+
+Anulowanie oczekiwania zostawia generowanie aktywne. Gdy przerywamy aktywne żądanie, wywołujemy `conversation.abort` z osobnym kontekstem, aby pi-durable mógł zapisać przerwanie i wysłać sygnał do żądania modelu. Zamykanie zasobów też używa kontekstu niezależnego od limitu review. Po otwarciu Harness odpowiada za zamknięcie swojej bazy. Jeśli otwarcie Harnessu się nie powiedzie, bazę zamyka aplikacja.
 
 Cache współdzielony między review, analiza kolejnych commitów w ramach istniejącego review oraz automatyczna implementacja poprawek po komentarzu na GitHubie pozostają poza zakresem pierwszej wersji.

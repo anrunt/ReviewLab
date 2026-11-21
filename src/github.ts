@@ -1,7 +1,9 @@
-import { Octokit } from 'octokit';
+import { Octokit, RequestError } from 'octokit';
 import { z } from 'zod';
 
 export const MAX_FILES = 200;
+
+export const MAX_REPOSITORY_FILE_BYTES = 1024 * 1024;
 
 const MAX_INPUT_BYTES = 512 * 1024;
 
@@ -15,6 +17,17 @@ const repositorySchema = z.object({
 });
 
 const shaSchema = z.string().regex(/^[0-9a-f]{40}$/i);
+
+const mergeBaseResponseSchema = z.object({
+  merge_base_commit: z.object({ sha: shaSchema }),
+});
+
+const repositoryFileResponseSchema = z.object({
+  type: z.literal('file'),
+  encoding: z.literal('base64'),
+  size: z.number().int().nonnegative().max(MAX_REPOSITORY_FILE_BYTES),
+  content: z.string(),
+});
 
 const pullRequestSchema = z.object({
   number: z.number().int().positive(),
@@ -73,6 +86,121 @@ export async function getPullRequest({
   });
 
   return pullRequestSchema.parse(response.data);
+}
+
+export async function getMergeBaseSha({
+  token,
+  owner,
+  repo,
+  baseSha,
+  headSha,
+}: {
+  token: string;
+  owner: string;
+  repo: string;
+  baseSha: string;
+  headSha: string;
+}) {
+  const octokit = new Octokit({
+    auth: token,
+    throttle: {
+      onRateLimit: () => false,
+      onSecondaryRateLimit: () => false,
+    },
+  });
+
+  const response = await octokit.rest.repos.compareCommitsWithBasehead({
+    owner,
+    repo,
+    basehead: `${baseSha}...${headSha}`,
+    per_page: 1,
+  });
+
+  return mergeBaseResponseSchema.parse(response.data).merge_base_commit.sha;
+}
+
+export async function getRepositoryFileText({
+  token,
+  owner,
+  repo,
+  filePath,
+  ref,
+  signal,
+}: {
+  token: string;
+  owner: string;
+  repo: string;
+  filePath: string;
+  ref: string;
+  signal?: AbortSignal;
+}) {
+  const segments = filePath.split('/');
+
+  if (
+    filePath.includes('\\') ||
+    filePath.includes('\0') ||
+    segments.some((segment) => segment === '' || segment === '.' || segment === '..')
+  ) {
+    throw new Error('Use a file path relative to the repository root.');
+  }
+
+  if (!shaSchema.safeParse(ref).success) {
+    throw new Error('A commit SHA is required to read a repository file.');
+  }
+
+  const octokit = new Octokit({
+    auth: token,
+    throttle: {
+      onRateLimit: () => false,
+      onSecondaryRateLimit: () => false,
+    },
+  });
+
+  let responseData: unknown;
+
+  try {
+    const response = await octokit.rest.repos.getContent({
+      owner,
+      repo,
+      path: filePath,
+      ref,
+      request: { signal },
+    });
+
+    responseData = response.data;
+  } catch (error) {
+    if (error instanceof RequestError && error.status === 404) {
+      throw new Error('This file is missing or inaccessible at the requested commit.');
+    }
+
+    throw new Error('Could not read this file from GitHub at the requested commit.');
+  }
+
+  const file = repositoryFileResponseSchema.safeParse(responseData);
+
+  if (!file.success) {
+    throw new Error('GitHub did not return file contents. Request a single file up to 1 MiB.');
+  }
+
+  const bytes = Buffer.from(file.data.content, 'base64');
+
+  if (bytes.length !== file.data.size) {
+    throw new Error('GitHub returned incomplete file contents.');
+  }
+
+  let text: string;
+
+  try {
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new Error('The file is not valid UTF-8 text.');
+  }
+
+  if (text.includes('\0')) {
+    throw new Error('The file contains binary data.');
+  }
+
+  return text;
 }
 
 export async function getPullRequestFiles({

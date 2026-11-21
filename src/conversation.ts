@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { chmod, mkdir, open, rmdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "@earendil-works/chord/context";
@@ -17,15 +18,13 @@ import {
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { getConversationModelRuntime, getDataDir } from "./auth.js";
 import { ReviewDoc, type ReviewInput, type ReviewState } from "./review-state.js";
-import { createSnapshotListTool, createSnapshotReadTool, createSnapshotSearchTool } from "./snapshot-tools.js";
+import { createMergeBaseReadTool, createSnapshotListTool, createSnapshotReadTool, createSnapshotSearchTool } from "./snapshot-tools.js";
 import { getSnapshotPath } from "./snapshot.js";
 
 const MODEL = { provider: "openai", modelId: "gpt-6.1-sol" };
 
 const CONVERSATION_TIMEOUT_MS = 150_000;
 
-// Only these application-authored messages may reach the CLI. Raw provider and
-// storage errors can include sensitive details and are not printed.
 class ConversationError extends Error {}
 
 async function readAnswer(
@@ -90,7 +89,6 @@ async function openConversationHarness(models: HarnessOptions["models"]) {
 
   async function close() {
     try {
-      // Closing the Harness also closes its storage. Use a fresh context.
       if (harness) {
         await harness.close(BACKGROUND_CONTEXT);
         harness = undefined;
@@ -117,7 +115,6 @@ async function openConversationHarness(models: HarnessOptions["models"]) {
     }
 
     try {
-      // Durable's SQLite adapter does not coordinate multiple Harness owners.
       await mkdir(lockPath, { mode: 0o700 });
       ownsLock = true;
     } catch (error) {
@@ -128,7 +125,6 @@ async function openConversationHarness(models: HarnessOptions["models"]) {
       throw error;
     }
 
-    // Create privately before SQLite opens it; SQLite's WAL/SHM inherit DB mode.
     const file = await open(databasePath, "a", 0o600);
 
     try {
@@ -137,7 +133,6 @@ async function openConversationHarness(models: HarnessOptions["models"]) {
       await file.close();
     }
 
-    // Existing sidecars from an interrupted process must also remain private.
     for (const suffix of ["-wal", "-shm"]) {
       try {
         await chmod(`${databasePath}${suffix}`, 0o600);
@@ -187,13 +182,14 @@ async function ensureNoPendingWork(harness: Harness, context: Context, allowedCo
   }
 }
 
-async function configureSnapshotTools(conversation: Conversation, registry: Registry, context: Context) {
+async function configureReviewTools(conversation: Conversation, registry: Registry, input: ReviewInput, context: Context) {
   const snapshotPath = getSnapshotPath(conversation.id);
 
   const tools = [
     createSnapshotReadTool(snapshotPath),
     createSnapshotListTool(snapshotPath),
     createSnapshotSearchTool(snapshotPath),
+    createMergeBaseReadTool(input),
   ];
 
   registry.install(defineExtension({ name: "repo_snapshot", tools }));
@@ -319,6 +315,18 @@ export class ReviewConversation {
     return submitConversation(this.conversation, JSON.stringify(this.state.input.files));
   }
 
+  async retryAnalysis(previous: SubmissionRecord) {
+    if (previous.type !== "input" || previous.requestId === undefined) {
+      throw new ConversationError("Expected an analysis input with a saved request ID.");
+    }
+
+    const context = withAbortSignal(AbortSignal.timeout(CONVERSATION_TIMEOUT_MS), BACKGROUND_CONTEXT);
+
+    await this.prepareAnalysisRuntime(context);
+
+    return submitConversation(this.conversation, JSON.stringify(this.state.input.files), previous.requestId);
+  }
+
   async waitForAnalysisSubmission(record: SubmissionRecord) {
     if (
       record.type !== "input" ||
@@ -376,15 +384,13 @@ export class ReviewConversation {
     const { harness, registry } = this.resources;
 
     try {
-      // Submitting or waiting enables scheduling for the whole Harness. We only have
-      // the snapshot tools for this review loaded here.
       await ensureNoPendingWork(harness, context, allowedConversationId);
 
       if (!this.modelAccess.current) {
         this.modelAccess.current = await getReviewModels();
       }
 
-      await configureSnapshotTools(this.conversation, registry, context);
+      await configureReviewTools(this.conversation, registry, this.state.input, context);
     } catch (error) {
       if (error instanceof ConversationError) {
         throw error;
@@ -399,7 +405,7 @@ export class ReviewConversation {
   }
 }
 
-async function submitConversation(conversation: Conversation, content: string) {
+async function submitConversation(conversation: Conversation, content: string, previousRequestId?: string) {
   if (!content.trim()) {
     throw new ConversationError("Conversation input must not be empty.");
   }
@@ -430,7 +436,13 @@ async function submitConversation(conversation: Conversation, content: string) {
         throw new ConversationError("The repository snapshot is not ready for analysis.");
       }
 
-      if (state.requestId === null) {
+      if (previousRequestId !== undefined) {
+        if (state.stage !== "analyzing") {
+          throw new ConversationError("The review must be in the analyzing stage to retry analysis.");
+        }
+
+        state.requestId = `review-${conversation.id}:analysis:${randomUUID()}`;
+      } else if (state.requestId === null) {
         state.requestId = `review-${conversation.id}:analysis:1`;
       }
 
@@ -459,8 +471,6 @@ async function submitConversation(conversation: Conversation, content: string) {
   } catch (error) {
     if (submissionInProgress) {
       try {
-        // Cancelling wait() alone does not stop generation. Use a fresh cleanup
-        // context to persist the abort and signal the actual model request.
         await conversation.abort(withAbortSignal(AbortSignal.timeout(10_000), BACKGROUND_CONTEXT));
       } catch {
         throw new ConversationError("Could not confirm that the conversation stopped. Storage will be closed; unfinished work may remain for explicit recovery.");

@@ -4,7 +4,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { ConversationId } from '@earendil-works/pi-durable';
 import { RequestError } from 'octokit';
 import { z } from 'zod';
-import { getPullRequest, getPullRequestFiles, MAX_FILES, ReviewInputLimitError } from './github.js';
+import { getMergeBaseSha, getPullRequest, getPullRequestFiles, MAX_FILES, ReviewInputLimitError } from './github.js';
 import { getAuthStatus, login, logout } from './auth.js';
 import { ReviewConversation } from './conversation.js';
 import { ReviewDoc, type ReviewInput } from './review-state.js';
@@ -172,17 +172,31 @@ if (positionals[0] === "resume") {
         let submission = await review.findAnalysisSubmission();
 
         if (submission?.status === "queued" || submission?.status === "placed") {
-          submission = await review.waitForAnalysisSubmission(submission);
+          const settled = await review.waitForAnalysisSubmission(submission);
+
+          if (settled.status === "unanswered") {
+            throw new Error("The resumed analysis ended without an answer.");
+          }
+
+          submission = settled;
         }
 
         if (submission?.status === "done") {
           const text = await review.readSavedAnswer(submission);
 
           console.log(text);
-        } else {
-          const status = submission?.status ?? "not_submitted";
+        } else if (submission?.status === "unanswered") {
+          if (submission.reason !== "model_error") {
+            throw new Error("The saved analysis ended without an answer and cannot be retried.");
+          }
 
-          console.log(`Review ${review.conversation.id} submission: ${status}`);
+          const result = await review.retryAnalysis(submission);
+
+          console.log(result.text);
+        } else {
+          const result = await review.startAnalysis();
+
+          console.log(result.text);
         }
       } else {
         if (review.state.stage === "preparing_snapshot") {
@@ -406,10 +420,26 @@ try {
   process.exit(1);
 }
 
+let mergeBaseSha: string;
+
+try {
+  mergeBaseSha = await getMergeBaseSha({
+    token: githubToken,
+    owner,
+    repo,
+    baseSha: pullRequest.base.sha,
+    headSha: pullRequest.head.sha,
+  });
+} catch {
+  console.error("Failed to determine the merge base for the pull request. Check GitHub access and try again.");
+  process.exit(1);
+}
+
 const reviewInput: ReviewInput = {
   owner,
   repo,
   pullRequest,
+  mergeBaseSha,
   files,
   systemPrompt,
 };

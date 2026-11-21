@@ -38,7 +38,6 @@ export async function downloadSnapshot(reviewId: ConversationId, owner: string, 
     throw new Error("GitHub returned an invalid repository archive.");
   }
 
-  // An interrupted extraction may have left a partial snapshot.
   await rm(snapshotPath, { recursive: true, force: true });
   await mkdir(snapshotPath, { recursive: true, mode: 0o700 });
 
@@ -46,7 +45,6 @@ export async function downloadSnapshot(reviewId: ConversationId, owner: string, 
     Readable.from([Buffer.from(archiveData)]),
     extract({
       cwd: snapshotPath,
-      // GitHub wraps repository files in one top-level directory.
       strip: 1,
       strict: true,
       preserveOwner: false,
