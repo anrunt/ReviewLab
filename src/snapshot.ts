@@ -7,14 +7,6 @@ import { Octokit } from "octokit";
 import { extract } from "tar";
 import { getDataDir } from "./auth.js";
 
-export function getSnapshotPath(reviewId: ConversationId) {
-  if (!Number.isSafeInteger(reviewId) || reviewId <= 0) {
-    throw new Error("Snapshot review ID must be a positive safe integer.");
-  }
-
-  return join(getDataDir(), "snapshots", String(reviewId), "snapshot");
-}
-
 export async function downloadSnapshot(reviewId: ConversationId, owner: string, repo: string, head_sha: string, token: string) {
   const octokit = new Octokit({
     auth: token,
@@ -52,4 +44,12 @@ export async function downloadSnapshot(reviewId: ConversationId, owner: string, 
   );
 
   return snapshotPath;
+}
+
+export function getSnapshotPath(reviewId: ConversationId) {
+  if (!Number.isSafeInteger(reviewId) || reviewId <= 0) {
+    throw new Error("Snapshot review ID must be a positive safe integer.");
+  }
+
+  return join(getDataDir(), "snapshots", String(reviewId), "snapshot");
 }

@@ -27,34 +27,101 @@ type SnapshotTextMatch = {
 
 class SnapshotFilePathError extends Error {}
 
-export async function validateSnapshotFilePath(snapshotPath: string, filePath: string) {
-  if (isAbsolute(filePath)) {
-    throw new SnapshotFilePathError("Snapshot file path must be relative.");
-  }
+export function createSnapshotReadTool(snapshotPath: string) {
+  return defineTool({
+    name: "read_repo_snapshot_file",
+    description: "Read the complete UTF-8 contents of a file from the repository snapshot at the reviewed PR head commit. Use this to inspect code and gather context for the review.",
+    parameters: Type.Object({
+      filePath: Type.String({
+        minLength: 1,
+        description: "File path relative to the repository snapshot root.",
+      }),
+    }),
+    execute: async ({ filePath }) => {
+      const content = await readSnapshotFile(snapshotPath, filePath);
 
-  const realSnapshotPath = await realpath(snapshotPath);
-  const realFilePath = await realpath(join(realSnapshotPath, filePath));
-  const relativeFilePath = relative(realSnapshotPath, realFilePath);
+      return {
+        output: [{ type: "text", text: content }],
+      };
+    },
+  });
+}
 
-  if (relativeFilePath === "") {
-    throw new SnapshotFilePathError("Snapshot file path must point to a file, not the snapshot directory.");
-  }
+export function createSnapshotListTool(snapshotPath: string) {
+  return defineTool({
+    name: "list_repo_snapshot_files",
+    description: "List file paths in the repository snapshot at the reviewed PR head commit. Returns alphabetically sorted paths relative to the snapshot root, one per line. Returned paths can be passed to read_repo_snapshot_file when additional context is needed.",
+    parameters: Type.Object({}),
+    execute: async () => {
+      const files = await listSnapshotFiles(snapshotPath);
 
-  if (
-    relativeFilePath === ".." ||
-    relativeFilePath.startsWith(`..${sep}`) ||
-    isAbsolute(relativeFilePath)
-  ) {
-    throw new SnapshotFilePathError("Snapshot file path must stay within the snapshot directory.");
-  }
+      if (files.length === 0) {
+        return {
+          output: [{ type: "text", text: "No files found in the repository snapshot." }],
+        };
+      }
 
-  const fileStats = await stat(realFilePath);
+      return {
+        output: [{ type: "text", text: files.join("\n") }],
+      };
+    },
+  });
+}
 
-  if (!fileStats.isFile()) {
-    throw new SnapshotFilePathError("Snapshot file path must point to a regular file.");
-  }
+export function createSnapshotSearchTool(snapshotPath: string) {
+  return defineTool({
+    name: "search_repo_snapshot_text",
+    description: "Search for literal, case-sensitive text in the reviewed repository snapshot. Returns a JSON object with a matches array containing filePath, lineNumber, and line for each matching line.",
+    parameters: Type.Object({
+      searchText: Type.String({
+        minLength: 1,
+        description: "Literal text to search for. Must be a single line, not a regular expression.",
+      }),
+    }),
+    execute: async ({ searchText }) => {
+      const result = await searchSnapshotText(snapshotPath, searchText);
 
-  return realFilePath;
+      return {
+        output: [{ type: "text", text: JSON.stringify(result) }],
+      };
+    },
+  });
+}
+
+export function createMergeBaseReadTool(input: Pick<ReviewInput, "owner" | "repo" | "mergeBaseSha">) {
+  return defineTool({
+    name: "read_merge_base_file",
+    description: "Read the complete UTF-8 text of one file at the review's merge base. Use this when you need to inspect the previous version of a file. For a renamed file, use its old path. Files added by the PR may be absent at the merge base.",
+    replay: "safe",
+    parameters: Type.Object({
+      filePath: Type.String({
+        minLength: 1,
+        description: "Path to the file relative to the repository root at the merge base.",
+      }),
+    }),
+    outputLimits: {
+      maxBytes: MAX_REPOSITORY_FILE_BYTES,
+      maxLines: MAX_REPOSITORY_FILE_BYTES + 1,
+    },
+    execute: async ({ filePath }, _api, context) => {
+      const token = process.env.GITHUB_TOKEN;
+
+      if (!token?.trim()) {
+        throw new Error("Missing GITHUB_TOKEN. Historical file contents are unavailable.");
+      }
+
+      const text = await getRepositoryFileText({
+        token,
+        owner: input.owner,
+        repo: input.repo,
+        filePath,
+        ref: input.mergeBaseSha,
+        signal: context.abortSignal,
+      });
+
+      return { output: [{ type: "text", text }] };
+    },
+  });
 }
 
 export async function readSnapshotFile(snapshotPath: string, filePath: string) {
@@ -203,99 +270,32 @@ export async function searchSnapshotText(snapshotPath: string, searchText: strin
   return { matches };
 }
 
-export function createSnapshotSearchTool(snapshotPath: string) {
-  return defineTool({
-    name: "search_repo_snapshot_text",
-    description: "Search for literal, case-sensitive text in the reviewed repository snapshot. Returns a JSON object with a matches array containing filePath, lineNumber, and line for each matching line.",
-    parameters: Type.Object({
-      searchText: Type.String({
-        minLength: 1,
-        description: "Literal text to search for. Must be a single line, not a regular expression.",
-      }),
-    }),
-    execute: async ({ searchText }) => {
-      const result = await searchSnapshotText(snapshotPath, searchText);
+export async function validateSnapshotFilePath(snapshotPath: string, filePath: string) {
+  if (isAbsolute(filePath)) {
+    throw new SnapshotFilePathError("Snapshot file path must be relative.");
+  }
 
-      return {
-        output: [{ type: "text", text: JSON.stringify(result) }],
-      };
-    },
-  });
-}
+  const realSnapshotPath = await realpath(snapshotPath);
+  const realFilePath = await realpath(join(realSnapshotPath, filePath));
+  const relativeFilePath = relative(realSnapshotPath, realFilePath);
 
-export function createSnapshotListTool(snapshotPath: string) {
-  return defineTool({
-    name: "list_repo_snapshot_files",
-    description: "List file paths in the repository snapshot at the reviewed PR head commit. Returns alphabetically sorted paths relative to the snapshot root, one per line. Returned paths can be passed to read_repo_snapshot_file when additional context is needed.",
-    parameters: Type.Object({}),
-    execute: async () => {
-      const files = await listSnapshotFiles(snapshotPath);
+  if (relativeFilePath === "") {
+    throw new SnapshotFilePathError("Snapshot file path must point to a file, not the snapshot directory.");
+  }
 
-      if (files.length === 0) {
-        return {
-          output: [{ type: "text", text: "No files found in the repository snapshot." }],
-        };
-      }
+  if (
+    relativeFilePath === ".." ||
+    relativeFilePath.startsWith(`..${sep}`) ||
+    isAbsolute(relativeFilePath)
+  ) {
+    throw new SnapshotFilePathError("Snapshot file path must stay within the snapshot directory.");
+  }
 
-      return {
-        output: [{ type: "text", text: files.join("\n") }],
-      };
-    },
-  });
-}
+  const fileStats = await stat(realFilePath);
 
-export function createSnapshotReadTool(snapshotPath: string) {
-  return defineTool({
-    name: "read_repo_snapshot_file",
-    description: "Read the complete UTF-8 contents of a file from the repository snapshot at the reviewed PR head commit. Use this to inspect code and gather context for the review.",
-    parameters: Type.Object({
-      filePath: Type.String({
-        minLength: 1,
-        description: "File path relative to the repository snapshot root.",
-      }),
-    }),
-    execute: async ({ filePath }) => {
-      const content = await readSnapshotFile(snapshotPath, filePath);
+  if (!fileStats.isFile()) {
+    throw new SnapshotFilePathError("Snapshot file path must point to a regular file.");
+  }
 
-      return {
-        output: [{ type: "text", text: content }],
-      };
-    },
-  });
-}
-
-export function createMergeBaseReadTool(input: Pick<ReviewInput, "owner" | "repo" | "mergeBaseSha">) {
-  return defineTool({
-    name: "read_merge_base_file",
-    description: "Read the complete UTF-8 text of one file at the review's merge base. Use this when you need to inspect the previous version of a file. For a renamed file, use its old path. Files added by the PR may be absent at the merge base.",
-    replay: "safe",
-    parameters: Type.Object({
-      filePath: Type.String({
-        minLength: 1,
-        description: "Path to the file relative to the repository root at the merge base.",
-      }),
-    }),
-    outputLimits: {
-      maxBytes: MAX_REPOSITORY_FILE_BYTES,
-      maxLines: MAX_REPOSITORY_FILE_BYTES + 1,
-    },
-    execute: async ({ filePath }, _api, context) => {
-      const token = process.env.GITHUB_TOKEN;
-
-      if (!token?.trim()) {
-        throw new Error("Missing GITHUB_TOKEN. Historical file contents are unavailable.");
-      }
-
-      const text = await getRepositoryFileText({
-        token,
-        owner: input.owner,
-        repo: input.repo,
-        filePath,
-        ref: input.mergeBaseSha,
-        signal: context.abortSignal,
-      });
-
-      return { output: [{ type: "text", text }] };
-    },
-  });
+  return realFilePath;
 }
