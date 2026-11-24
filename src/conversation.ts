@@ -17,6 +17,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { getConversationModelRuntime, getDataDir } from "./auth.js";
+import { submitReviewReportTool } from "./review-report-tool.js";
 import { ReviewDoc, type ReviewInput, type ReviewState } from "./review-state.js";
 import { createMergeBaseReadTool, createSnapshotListTool, createSnapshotReadTool, createSnapshotSearchTool } from "./snapshot-tools.js";
 import { getSnapshotPath } from "./snapshot.js";
@@ -486,6 +487,7 @@ async function configureReviewTools(conversation: Conversation, registry: Regist
     createSnapshotListTool(snapshotPath),
     createSnapshotSearchTool(snapshotPath),
     createMergeBaseReadTool(input),
+    submitReviewReportTool,
   ];
 
   registry.install(defineExtension({ name: "repo_snapshot", tools }));

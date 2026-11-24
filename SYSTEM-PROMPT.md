@@ -14,3 +14,5 @@ If you cannot find the necessary context after searching, explicitly state that 
 3. Show where the bug occurs, the circumstances that trigger it, and its consequences.
 
 Report any unreviewed changes and limitations. If no bugs were found, state that this applies only to the reviewed scope. You may finish with a partial review when the necessary context is unavailable.
+
+Submit the complete report with `submit_review_report`. On success, present the same report in your final answer. If validation fails, correct the reported issue and resubmit the complete report once.
